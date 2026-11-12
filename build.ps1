@@ -8,4 +8,8 @@ if ($args -contains '-Test') {
     if ($LASTEXITCODE -ne 0) { throw 'Compilazione test fallita' }
     & "$PSScriptRoot\bin\LayoutTests.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Test falliti' }
+    & $compiler /nologo /codepage:65001 /target:exe /out:"$PSScriptRoot\bin\CropNativeTests.exe" /main:CropNativeTests /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "$PSScriptRoot\src\Program.cs" "$PSScriptRoot\src\FocusView.cs" "$PSScriptRoot\tests\CropNativeTests.cs"
+    if ($LASTEXITCODE -ne 0) { throw 'Compilazione test nativi fallita' }
+    & "$PSScriptRoot\bin\CropNativeTests.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Test nativi falliti' }
 }

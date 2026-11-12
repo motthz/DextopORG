@@ -66,7 +66,8 @@ internal sealed class Organizer : ApplicationContext
     bool enabled = true;
     bool restoring;
     bool selecting;
-    readonly List<FocusView> focusViews = new List<FocusView>();
+    readonly Dictionary<IntPtr, WindowCrop> crops = new Dictionary<IntPtr, WindowCrop>();
+    bool warned;
 
     public Organizer()
     {
@@ -75,10 +76,10 @@ internal sealed class Organizer : ApplicationContext
         pause = new ToolStripMenuItem("Pausa   Ctrl+Alt+P", null, delegate { Toggle(); });
         menu.Items.Add(pause);
         menu.Items.Add("Ripristina e metti in pausa   Ctrl+Alt+R", null, delegate { Restore(); });
-        menu.Items.Add("Zoom zona: istruzioni   Ctrl+Alt+Z", null, delegate {
-            tray.ShowBalloonTip(6000, "Seleziona una zona", "Porta il mouse sopra la finestra, premi Ctrl+Alt+Z e trascina un rettangolo. Esc chiude la vista zoom.", ToolTipIcon.Info);
+        menu.Items.Add("Ritaglia finestra: istruzioni   Ctrl+Alt+Z", null, delegate {
+            tray.ShowBalloonTip(6000, "Seleziona una zona", "Mouse sulla finestra, Ctrl+Alt+Z e trascina. Stessa combinazione per togliere il ritaglio. Nessuna finestra duplicata.", ToolTipIcon.Info);
         });
-        menu.Items.Add("Chiudi tutti gli zoom", null, delegate { CloseFocus(); });
+        menu.Items.Add("Rimuovi tutti i ritagli selezionati", null, delegate { ClearFocus(); if (enabled) Arrange(); });
         var startup = new ToolStripMenuItem("Avvia con Windows");
         using (var key = Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run"))
             startup.Checked = key != null && key.GetValue("DextopORG") != null;
@@ -111,10 +112,11 @@ internal sealed class Organizer : ApplicationContext
     {
         var result = new List<IntPtr>();
         Native.EnumWindows(delegate(IntPtr h, IntPtr p) {
-            if (focusViews.Any(v => v.Source == h)) return true;
             if (!Native.IsWindowVisible(h) || Native.IsIconic(h) || Native.GetWindow(h, 4) != IntPtr.Zero) return true;
+            uint pid; Native.GetWindowThreadProcessId(h, out pid);
+            if (pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return true;
             long style = Native.GetWindowLong(h, -16), ex = Native.GetWindowLong(h, -20);
-            if ((style & 0x40000) == 0 || (ex & 0x80) != 0) return true;
+            if ((style & (0x40000 | 0xC00000)) == 0 || (ex & 0x80) != 0) return true;
             int cloaked;
             if (Native.DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return true;
             var name = new StringBuilder(256);
@@ -128,7 +130,7 @@ internal sealed class Organizer : ApplicationContext
 
     string Signature(List<IntPtr> windows)
     {
-        return string.Join(";", windows.Select(h => h.ToInt64() + "@" + Screen.FromHandle(h).DeviceName)) + "|" +
+        return string.Join(";", windows.Select(h => h.ToInt64() + "@" + ScreenFor(h).DeviceName + WindowCrop.Bounds(h) + WindowCrop.VisibleBounds(h))) + "|" +
             string.Join(";", Screen.AllScreens.Select(s => s.DeviceName + s.WorkingArea.ToString()));
     }
     void Toggle()
@@ -136,41 +138,57 @@ internal sealed class Organizer : ApplicationContext
         enabled = !enabled;
         pause.Checked = !enabled;
         tray.Text = enabled ? "DextopORG · automatico" : "DextopORG · in pausa";
+        if (!enabled) { ClearFocus(); ReleaseCrops(); }
         if (enabled) Arrange();
+    }
+    Screen ScreenFor(IntPtr h) { return Screen.FromRectangle(WindowCrop.VisibleBounds(h)); }
+    void SaveOriginal(IntPtr h)
+    {
+        if (originals.ContainsKey(h)) return;
+        var p = new Native.Placement { length = Marshal.SizeOf(typeof(Native.Placement)) };
+        if (Native.GetWindowPlacement(h, ref p)) originals[h] = p;
+    }
+    WindowCrop CropFor(IntPtr h)
+    {
+        WindowCrop crop;
+        if (!crops.TryGetValue(h,out crop)) { crop = new WindowCrop(h); crops.Add(h,crop); }
+        return crop;
     }
     void Arrange() { Arrange(Windows()); }
     void Arrange(List<IntPtr> windows)
     {
         foreach (var dead in originals.Keys.Where(h => !Native.IsWindow(h)).ToArray()) originals.Remove(dead);
-        foreach (var group in windows.GroupBy(h => Screen.FromHandle(h).DeviceName))
+        foreach (var dead in crops.Where(p => !p.Value.IsCurrent).Select(p => p.Key).ToArray()) { crops[dead].Dispose(); crops.Remove(dead); originals.Remove(dead); }
+        bool failed = false;
+        foreach (var group in windows.GroupBy(h => ScreenFor(h).DeviceName))
         {
             var handles = group.ToArray();
-            var screen = Screen.FromHandle(handles[0]);
+            var screen = ScreenFor(handles[0]);
             var tiles = Layout.Compute(screen.WorkingArea, handles.Length);
             for (int i = 0; i < handles.Length; i++)
             {
                 IntPtr h = handles[i];
-                if (!originals.ContainsKey(h)) {
-                    var placement = new Native.Placement { length = Marshal.SizeOf(typeof(Native.Placement)) };
-                    if (Native.GetWindowPlacement(h, ref placement)) originals[h] = placement;
-                }
+                SaveOriginal(h);
+                var crop = CropFor(h);
+                if (crop.Selection.HasValue) { if (!crop.Apply(tiles[i])) failed = true; continue; }
                 if (Native.IsZoomed(h)) Native.ShowWindow(h, 4);
                 Rectangle t = tiles[i];
-                // Account for invisible resize borders so visible frames meet exactly.
-                Native.Rect outer, frame;
-                if (Native.GetWindowRect(h, out outer) && Native.DwmGetWindowAttribute(h, 9, out frame, Marshal.SizeOf(typeof(Native.Rect))) == 0) {
-                    t = Rectangle.FromLTRB(t.Left - (frame.left - outer.left), t.Top - (frame.top - outer.top),
-                        t.Right + (outer.right - frame.right), t.Bottom + (outer.bottom - frame.bottom));
-                }
-                Native.SetWindowPos(h, IntPtr.Zero, t.X, t.Y, t.Width, t.Height, 0x0014 | 0x0200);
+                // Use outer bounds directly. DWM frame extents can change after a
+                // region is applied; feeding them back here would cause size drift.
+                if (!Native.SetWindowPos(h, IntPtr.Zero, t.X, t.Y, t.Width, t.Height, 0x0014 | 0x0200) || !crop.Apply(tiles[i])) failed = true;
             }
         }
         signature = Signature(windows);
+        if (failed && !warned) {
+            tray.ShowBalloonTip(6000,"Finestra non controllabile", "Una finestra ha rifiutato posizione o ritaglio (per esempio per privilegi diversi). Su quella finestra non posso garantire l'assenza di sovrapposizioni.",ToolTipIcon.Warning);
+            warned = true;
+        }
+        if (!failed) warned = false;
     }
     void Restore()
     {
         if (enabled) Toggle();
-        CloseFocus();
+        ClearFocus(); ReleaseCrops();
         restoring = true;
         foreach (var pair in originals) {
             var p = pair.Value;
@@ -181,25 +199,44 @@ internal sealed class Organizer : ApplicationContext
     }
     protected override void ExitThreadCore()
     {
-        CloseFocus();
+        ClearFocus(); ReleaseCrops();
         timer.Stop(); timer.Dispose(); hotkeys.Dispose();
         tray.Visible = false; tray.Dispose();
         base.ExitThreadCore();
     }
 
-    void CloseFocus() { foreach (var view in focusViews.ToArray()) view.Close(); }
+    void ClearFocus()
+    {
+        foreach (var pair in crops.Where(p => p.Value.Selection.HasValue).ToArray()) {
+            pair.Value.Restore(); pair.Value.Selection = null;
+            Native.Placement p;
+            if (pair.Value.IsCurrent && originals.TryGetValue(pair.Key,out p)) Native.SetWindowPlacement(pair.Key,ref p);
+        }
+        signature = "";
+    }
+    void ReleaseCrops() { foreach (var crop in crops.Values) crop.Dispose(); crops.Clear(); }
     void SelectFocus()
     {
         if (selecting) return;
         IntPtr source = Native.GetAncestor(Native.WindowFromPoint(new Native.Point { x = Cursor.Position.X, y = Cursor.Position.Y }), 2);
-        if (source == IntPtr.Zero || focusViews.Any(v => v.Handle == source)) return;
+        if (source == IntPtr.Zero) return;
         uint pid;
         Native.GetWindowThreadProcessId(source, out pid);
         if (pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return;
+        if (!Windows().Contains(source)) return;
+        WindowCrop existing;
+        if (crops.TryGetValue(source,out existing) && existing.Selection.HasValue) {
+            existing.Selection = null; existing.Restore();
+            Native.Placement p; if (originals.TryGetValue(source,out p)) Native.SetWindowPlacement(source,ref p);
+            if (enabled) Arrange();
+            return;
+        }
+        SaveOriginal(source);
+        if (Native.IsZoomed(source)) Native.ShowWindow(source,4);
         Native.Rect rect;
         if (!Native.IsWindowVisible(source) || Native.IsIconic(source) || !Native.GetWindowRect(source, out rect)) return;
         Rectangle bounds = Rectangle.FromLTRB(rect.left, rect.top, rect.right, rect.bottom);
-        Rectangle visible = Rectangle.Intersect(bounds, Screen.FromHandle(source).Bounds);
+        Rectangle visible = Rectangle.Intersect(WindowCrop.VisibleBounds(source), ScreenFor(source).Bounds);
         if (visible.Width < 16 || visible.Height < 16) return;
         selecting = true;
         try {
@@ -207,16 +244,14 @@ internal sealed class Organizer : ApplicationContext
                 if (selector.ShowDialog() != DialogResult.OK || !Native.IsWindow(source)) return;
                 Rectangle selected = selector.Selection;
                 selected.Offset(visible.Left - bounds.Left, visible.Top - bounds.Top);
-                foreach (var old in focusViews.Where(v => v.Source == source).ToArray()) old.Close();
-                var view = new FocusView(source, selected, bounds);
-                view.FormClosed += delegate { focusViews.Remove(view); signature = ""; };
-                focusViews.Add(view);
-                try { view.Show(); }
-                catch { focusViews.Remove(view); view.Dispose(); throw; }
+                var crop = CropFor(source);
+                crop.Selection = selected;
+                // Arrange once even when paused: the chosen area must never cover another tile.
+                Arrange();
                 signature = "";
             }
         } catch (Exception e) {
-            tray.ShowBalloonTip(5000, "Zoom non disponibile", e.Message, ToolTipIcon.Warning);
+            tray.ShowBalloonTip(5000, "Ritaglio non disponibile", e.Message, ToolTipIcon.Warning);
         } finally { selecting = false; }
     }
 }

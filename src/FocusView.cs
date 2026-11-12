@@ -3,18 +3,6 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-internal static class FocusGeometry
-{
-    public static Rectangle Fit(Size source, Rectangle target)
-    {
-        if (source.Width <= 0 || source.Height <= 0 || target.Width <= 0 || target.Height <= 0) return Rectangle.Empty;
-        double scale = Math.Min((double)target.Width / source.Width, (double)target.Height / source.Height);
-        int w = Math.Max(1, (int)(source.Width * scale));
-        int h = Math.Max(1, (int)(source.Height * scale));
-        return new Rectangle(target.X + (target.Width - w) / 2, target.Y + (target.Height - h) / 2, w, h);
-    }
-}
-
 internal sealed class RegionSelector : Form
 {
     Point anchor;
@@ -61,69 +49,108 @@ internal sealed class RegionSelector : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
-        e.Graphics.DrawString("Trascina sulla zona da ingrandire - Esc annulla", SystemFonts.MessageBoxFont, Brushes.White, 12, 12);
+        e.Graphics.DrawString("Trascina sulla zona da mantenere visibile - Esc annulla", SystemFonts.MessageBoxFont, Brushes.White, 12, 12);
         if (Selection.Width > 0 && Selection.Height > 0)
             using (var pen = new Pen(Color.Lime, 3)) e.Graphics.DrawRectangle(pen, Selection);
     }
 }
 
-internal sealed class FocusView : Form
+internal static class CropGeometry
 {
-    public readonly IntPtr Source;
-    readonly Rectangle region;
-    IntPtr thumbnail;
-    readonly Timer watch = new Timer { Interval = 300 };
-    public FocusView(IntPtr source, Rectangle selected, Rectangle bounds)
+    // Keep the selected pixels at their native size; do not resize/reflow the source app.
+    public static Point WindowOrigin(Rectangle selected, Rectangle tile)
     {
-        Source = source; region = selected;
-        Text = "DextopORG Zoom - vista live - Esc chiude";
-        BackColor = Color.FromArgb(20,20,24);
-        StartPosition = FormStartPosition.Manual;
-        Bounds = bounds;
-        MinimumSize = new Size(160,120);
-        TopMost = true;
-        KeyPreview = true;
-        watch.Tick += delegate {
-            if (!Native.IsWindow(Source)) { Close(); return; }
-            Text = Native.IsIconic(Source) ? "DextopORG Zoom - ripristina la finestra originale" : "DextopORG Zoom - vista live - Esc chiude";
-            UpdateThumbnail();
-        };
+        return new Point(tile.Left + (tile.Width - selected.Width) / 2 - selected.Left,
+            tile.Top + (tile.Height - selected.Height) / 2 - selected.Top);
     }
-    protected override void OnShown(EventArgs e)
+    public static Rectangle LocalClip(Rectangle window, Rectangle tile, Rectangle? selected)
     {
-        base.OnShown(e);
-        int result = DwmRegisterThumbnail(Handle, Source, out thumbnail);
-        if (result != 0) { Close(); Marshal.ThrowExceptionForHR(result); }
-        UpdateThumbnail(); watch.Start();
+        var visible = Rectangle.Intersect(window, tile);
+        if (selected.HasValue) {
+            var area = selected.Value;
+            area.Offset(window.Location);
+            visible = Rectangle.Intersect(visible, area);
+        }
+        if (visible.Width <= 0 || visible.Height <= 0) return Rectangle.Empty;
+        visible.Offset(-window.Left, -window.Top);
+        return visible;
     }
-    protected override void OnResize(EventArgs e) { base.OnResize(e); UpdateThumbnail(); }
-    protected override void OnKeyDown(KeyEventArgs e) { if (e.KeyCode == Keys.Escape) Close(); base.OnKeyDown(e); }
-    void UpdateThumbnail()
+}
+
+// Owns a saved copy of the app's original window region. Never owns the live HRGN
+// after SetWindowRgn succeeds: Windows takes ownership of that handle.
+internal sealed class WindowCrop : IDisposable
+{
+    public readonly IntPtr Handle;
+    readonly uint processId;
+    IntPtr original;
+    bool hadRegion;
+    bool applied;
+    public Rectangle? Selection;
+    public WindowCrop(IntPtr handle)
     {
-        if (thumbnail == IntPtr.Zero) return;
-        var dest = FocusGeometry.Fit(region.Size, ClientRectangle);
-        var p = new ThumbnailProperties {
-            flags = 31, destination = ToRect(dest), source = ToRect(region), opacity = 255,
-            visible = !Native.IsIconic(Source), clientOnly = false
-        };
-        int result = DwmUpdateThumbnailProperties(thumbnail, ref p);
-        if (result != 0) { Text = "DextopORG Zoom - contenuto non disponibile"; }
+        Handle = handle;
+        Native.GetWindowThreadProcessId(handle, out processId);
+        original = CreateRectRgn(0,0,0,0);
+        if (original == IntPtr.Zero) throw new InvalidOperationException("Impossibile salvare il ritaglio originale.");
+        hadRegion = GetWindowRgn(handle, original) != 0;
     }
-    static Native.Rect ToRect(Rectangle r) { return new Native.Rect { left=r.Left, top=r.Top, right=r.Right, bottom=r.Bottom }; }
-    protected override void Dispose(bool disposing)
+    public bool IsCurrent {
+        get { uint pid; Native.GetWindowThreadProcessId(Handle, out pid); return Native.IsWindow(Handle) && pid == processId; }
+    }
+    public static Rectangle Bounds(IntPtr handle)
     {
-        if (disposing) { watch.Stop(); watch.Dispose(); }
-        if (thumbnail != IntPtr.Zero) { DwmUnregisterThumbnail(thumbnail); thumbnail = IntPtr.Zero; }
-        base.Dispose(disposing);
+        Native.Rect r;
+        return Native.GetWindowRect(handle, out r) ? Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom) : Rectangle.Empty;
     }
-    [StructLayout(LayoutKind.Sequential)] struct ThumbnailProperties {
-        public uint flags;
-        public Native.Rect destination, source;
-        public byte opacity;
-        [MarshalAs(UnmanagedType.Bool)] public bool visible;
-        [MarshalAs(UnmanagedType.Bool)] public bool clientOnly;
+    public static Rectangle VisibleBounds(IntPtr handle)
+    {
+        var bounds = Bounds(handle);
+        Native.Rect r;
+        if (GetWindowRgnBox(handle, out r) > 0) {
+            var region = Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom);
+            region.Offset(bounds.Location);
+            bounds = Rectangle.Intersect(bounds,region);
+        }
+        return bounds;
     }
-    [DllImport("dwmapi.dll")] static extern int DwmRegisterThumbnail(IntPtr destination, IntPtr source, out IntPtr thumbnail);
-    [DllImport("dwmapi.dll")] static extern int DwmUpdateThumbnailProperties(IntPtr thumbnail, ref ThumbnailProperties properties);
-    [DllImport("dwmapi.dll")] static extern int DwmUnregisterThumbnail(IntPtr thumbnail);
+    public bool Apply(Rectangle tile)
+    {
+        if (!IsCurrent) return false;
+        if (Selection.HasValue) {
+            var origin = CropGeometry.WindowOrigin(Selection.Value,tile);
+            if (!Native.SetWindowPos(Handle,IntPtr.Zero,origin.X,origin.Y,0,0,0x0015 | 0x0200)) return false;
+        }
+        var clip = CropGeometry.LocalClip(Bounds(Handle),tile,Selection);
+        IntPtr region = CreateRectRgn(clip.Left,clip.Top,clip.Right,clip.Bottom);
+        if (region == IntPtr.Zero) return false;
+        if (hadRegion && CombineRgn(region,region,original,1) == 0) { DeleteObject(region); return false; }
+        if (SetWindowRgn(Handle,region,true) == 0) { DeleteObject(region); return false; }
+        applied = true;
+        return true;
+    }
+    public bool Restore()
+    {
+        if (!applied || !IsCurrent) return true;
+        IntPtr region = IntPtr.Zero;
+        if (hadRegion) {
+            region = CreateRectRgn(0,0,0,0);
+            if (region == IntPtr.Zero) return false;
+            if (CombineRgn(region,original,IntPtr.Zero,5) == 0) { DeleteObject(region); return false; }
+        }
+        if (SetWindowRgn(Handle,region,true) == 0) { if (region != IntPtr.Zero) DeleteObject(region); return false; }
+        applied = false;
+        return true;
+    }
+    public void Dispose()
+    {
+        Restore();
+        if (original != IntPtr.Zero) { DeleteObject(original); original = IntPtr.Zero; }
+    }
+    [DllImport("gdi32.dll")] static extern IntPtr CreateRectRgn(int left,int top,int right,int bottom);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr handle);
+    [DllImport("gdi32.dll")] static extern int CombineRgn(IntPtr dest,IntPtr a,IntPtr b,int mode);
+    [DllImport("user32.dll")] static extern int GetWindowRgn(IntPtr h,IntPtr region);
+    [DllImport("user32.dll")] static extern int GetWindowRgnBox(IntPtr h,out Native.Rect rect);
+    [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr h,IntPtr region,bool redraw);
 }

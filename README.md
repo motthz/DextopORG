@@ -1,39 +1,41 @@
 # DextopORG
 
-Un piccolo gestore automatico delle finestre per Windows 10/11. Lavora nell'area di notifica, senza finestra principale e senza dipendenze da scaricare. Scritto in C# con WinForms e API Win32, usa .NET Framework 4.8 incluso nelle versioni supportate di Windows.
+Gestore automatico delle finestre per Windows 10/11. Lavora nell'area di notifica e dispone le finestre indipendentemente su ciascun monitor. C# / WinForms / API Win32, senza pacchetti esterni, con .NET Framework 4.8 presente nelle versioni supportate di Windows.
 
-## Avvio
+## Avvio e comandi
 
-Scarica `DextopORG.exe` dalla sezione **Releases** ed eseguilo. La prima disposizione avviene entro un secondo. Il programma non è firmato: Windows potrebbe mostrare SmartScreen. Puoi anche compilare personalmente il sorgente.
+Scarica `DextopORG.exe` dall'ultima **Release**. Chiudi la versione precedente dal suo menu **Esci**, poi avvia quella nuova. Il file non è firmato e Windows potrebbe mostrare SmartScreen. Puoi anche compilare il sorgente.
 
 | Combinazione | Azione |
 | --- | --- |
 | Ctrl+Alt+O | Riordina subito |
-| Ctrl+Alt+P | Attiva/disattiva l'automatismo |
-| Ctrl+Alt+R | Ripristina le posizioni salvate e mette in pausa |
-| Ctrl+Alt+Z | Seleziona una zona della finestra sotto il mouse e apre lo zoom live |
+| Ctrl+Alt+P | Pausa/riprendi l'automatismo |
+| Ctrl+Alt+R | Rimuovi tutti i ritagli, ripristina le posizioni iniziali e metti in pausa |
+| Ctrl+Alt+Z | Con il mouse sopra una finestra, seleziona una zona; ripeti per rimuovere il ritaglio |
 
-Clic destro sull'icona per gli stessi comandi, l'avvio con Windows (facoltativo) e **Esci**. Doppio clic per attivare o mettere in pausa. Uscire lascia le finestre nella posizione corrente; per tornare alla disposizione precedente usa prima il ripristino. Le posizioni originali sono conservate solo durante la sessione.
+Clic destro sull'icona per i comandi, le istruzioni del ritaglio, la rimozione di tutte le selezioni, l'avvio facoltativo con Windows e **Esci**. Doppio clic per pausa/ripresa.
 
-## Zoom su una zona
+## Selezione sulla finestra originale
 
-Porta il mouse sopra la finestra interessata, premi **Ctrl+Alt+Z** e trascina un rettangolo sulla parte da tenere in evidenza. **Esc** o clic destro annullano la selezione.
+Porta il mouse sulla finestra, premi **Ctrl+Alt+Z** e trascina un rettangolo sulla zona che vuoi mantenere visibile. **Esc** o clic destro annullano la selezione. L'overlay esiste solo durante la selezione: non viene creata una seconda finestra per il contenuto e non viene mostrata una copia live.
 
-Si apre una vista live sempre in primo piano: la zona selezionata rimane centrata e viene ingrandita al massimo nello spazio disponibile, mantenendo le proporzioni. La vista entra nel riordino sul proprio monitor al posto della finestra originale. Puoi spostarla su un altro monitor o ridimensionarla. Sono supportate più viste, una per finestra originale.
+Il ritaglio viene applicato direttamente alla finestra originale, che conserva i suoi controlli cliccabili e la tastiera. La zona selezionata viene centrata nel riquadro assegnato sul relativo monitor. La finestra non viene ridimensionata mentre ha una selezione, per evitare di cambiare l'impaginazione del contenuto. Se la zona è più grande del riquadro, viene tagliata simmetricamente ai bordi. Se è più piccola, resta spazio libero intorno.
 
-**Esc** nella vista oppure la sua **X** chiudono lo zoom. Dal menu puoi chiudere tutti gli zoom; anche il comando di ripristino li chiude. La finestra originale resta aperta e non viene più ridimensionata dal riordino finché esiste la vista. Per interagire con il contenuto usa la finestra originale: lo zoom è una vista di sola lettura, non cambia lo zoom interno dell'applicazione.
+**Il ritaglio conserva la scala originale dei pixel: non è uno zoom del contenuto.** Windows non offre un modo universale per ingrandire testo e controlli dentro qualsiasi finestra mantenendola interattiva, senza una vista separata. Usa lo zoom dell'applicazione quando disponibile e seleziona nuovamente la zona dopo averlo cambiato. Il riquadro segue coordinate fisse, non un oggetto dopo uno scorrimento.
 
-Il riquadro segue coordinate fisse all'interno della finestra, anche se questa viene spostata: non riconosce oggetti o testo e non li segue dopo uno scorrimento o un cambio di impaginazione. Non ridurre a icona la sorgente: in quel caso la vista si sospende fino al ripristino. Contenuti protetti o alcune applicazioni possono non essere riprodotti. La selezione è valida per la sessione corrente.
+Per tornare alla finestra intera, premi nuovamente **Ctrl+Alt+Z** con il mouse sulla sua parte visibile. **Ctrl+Alt+R** ripristina tutto, anche se la selezione ha nascosto barra del titolo o pulsanti. Pausa e uscita rimuovono i ritagli; le finestre selezionate tornano alla posizione iniziale, le altre restano nella posizione assegnata. Le selezioni e le posizioni iniziali sono conservate solo durante la sessione.
 
-La riproduzione usa le [thumbnail live di Windows DWM](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ns-dwmapi-dwm_thumbnail_properties), con ritaglio della sorgente e adattamento proporzionale della destinazione.
+## Disposizione senza sovrapposizioni
 
-## Come dispone le finestre
+Ogni monitor ha il proprio insieme di finestre e usa la propria area di lavoro, escludendo la barra delle applicazioni. L'app confronta disposizioni a righe bilanciate, preferendo proporzioni vicine a 16:10. Le finestre non vengono trasferite automaticamente tra monitor.
 
-Considera le finestre visibili e ridimensionabili del desktop attuale, escluse finestre ridotte a icona, pannelli strumenti e finestre di dialogo. Ogni finestra resta sul proprio monitor. Per ciascun monitor confronta disposizioni a righe bilanciate e sceglie quella con proporzioni complessivamente più vicine a 16:10, occupando tutta l'area disponibile senza coprire la barra delle applicazioni. Non è una ricerca di tutte le partizioni geometriche possibili: è un criterio prevedibile di buon equilibrio fra spazio e leggibilità.
+Dopo aver richiesto posizione e dimensioni, l'app legge le dimensioni effettive e limita la regione visibile di ogni finestra al suo riquadro. Quindi, anche se un'app impone una dimensione minima più grande del riquadro, la parte eccedente viene tagliata e non copre le altre finestre. Questa scelta può nascondere contenuti o comandi: usa **Ctrl+Alt+R** per recuperarli. I ritagli espliciti seguono lo stesso vincolo.
 
-Controlla ogni 800 ms se sono cambiate le finestre o gli schermi. Riordina quando apri, chiudi, riduci, ripristini una finestra o la sposti su un altro monitor. Aspetta il rilascio del mouse per evitare interferenze durante il trascinamento. Uno spostamento manuale sullo stesso monitor resta fino al successivo riordino.
+Il controllo avviene ogni 800 ms: apertura, chiusura, riduzione, ripristino, spostamento e ridimensionamento delle finestre provocano un riordino. Durante il trascinamento l'app aspetta il rilascio del mouse. Il vincolo viene riapplicato dopo uno spostamento manuale; durante il trascinamento o prima del controllo successivo può esserci una sovrapposizione transitoria.
 
-Con molte finestre, le dimensioni minime imposte da alcune applicazioni possono impedire di mostrarle tutte senza sovrapposizioni. Le finestre con privilegi amministrativi possono rifiutare il ridimensionamento da un processo normale. Monitor con fattori di scala differenti richiedono verifica sul proprio dispositivo. Non viene garantita una disposizione ideale per ogni app o contenuto. Non sposta file o icone sul desktop.
+Sono gestite le finestre principali visibili, incluse quelle di dimensione fissa. Finestre ridotte a icona, desktop virtuali non attivi, pannelli strumenti, menu e finestre di dialogo dipendenti restano esclusi. Un'app con privilegi superiori o che rifiuta le API di posizione/ritaglio può impedire il controllo: viene mostrato un avviso e su quella finestra non si garantisce il vincolo. Le configurazioni con DPI misti richiedono verifica sul dispositivo.
+
+Il ritaglio usa [SetWindowRgn](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowrgn). La regione originale viene salvata e ripristinata alla rimozione del ritaglio e all'uscita normale. Usa **Esci** invece di terminare forzatamente il processo, per consentire il ripristino.
 
 ## Compilazione e test
 
@@ -44,10 +46,17 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -Test
 .\bin\DextopORG.exe
 ```
 
-Il compilatore incluso in Windows produce `bin/DextopORG.exe`. I test verificano 200 disposizioni e 12 casi di adattamento dello zoom: limiti, centratura e proporzioni, oltre agli input vuoti. La CI ripete compilazione e test su Windows. Selezione, ritaglio live, ingrandimento dopo ridimensionamento e chiusura con Esc sono verificabili su Windows con la finestra sintetica `tests/FocusPreview.cs`; resta necessaria la verifica con le proprie applicazioni e configurazioni multi-monitor.
+Il compilatore incluso in Windows produce `bin/DextopORG.exe`. La CI esegue gli stessi test su Windows:
+
+- 200 disposizioni: numero, limiti, assenza di sovrapposizioni e copertura completa, con monitor verticali, coordinate negative e risoluzioni dispari.
+- 12 casi di centratura e ritaglio della selezione, anche quando supera il riquadro.
+- 40 disposizioni con finestre che eccedono lo spazio assegnato.
+- Test Win32 su finestre di prova: confinamento nonostante la dimensione minima, conservazione dello stesso HWND, nessuna finestra aggiunta, centratura e ripristino delle regioni originali.
+
+`tests/FocusPreview.cs` è una fixture manuale che non avvia il riordino delle altre applicazioni. Consente di verificare la selezione e il clic su un controllo originale dopo il ritaglio. **Esc** nella fixture rimuove il ritaglio di prova. Il comportamento richiede comunque verifica con le proprie applicazioni e configurazioni multi-monitor.
 
 ## Privacy e rimozione
 
-Nessuna connessione di rete o telemetria. Lo zoom riproduce localmente la zona selezionata, senza salvarne immagini o leggere il testo. L'unica impostazione persistente è l'eventuale voce `DextopORG` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Per rimuovere l'app, disattiva prima **Avvia con Windows**, scegli **Esci** ed elimina l'eseguibile.
+Nessuna connessione di rete, telemetria o lettura dei contenuti delle finestre. Non vengono salvate immagini. L'unica impostazione persistente è la voce opzionale `DextopORG` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Per rimuovere l'app, disattiva **Avvia con Windows**, scegli **Esci** ed elimina l'eseguibile. L'app non organizza file o icone del desktop.
 
 Licenza MIT.
