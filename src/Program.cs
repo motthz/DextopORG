@@ -65,6 +65,8 @@ internal sealed class Organizer : ApplicationContext
     string signature = "";
     bool enabled = true;
     bool restoring;
+    bool selecting;
+    readonly List<FocusView> focusViews = new List<FocusView>();
 
     public Organizer()
     {
@@ -73,6 +75,10 @@ internal sealed class Organizer : ApplicationContext
         pause = new ToolStripMenuItem("Pausa   Ctrl+Alt+P", null, delegate { Toggle(); });
         menu.Items.Add(pause);
         menu.Items.Add("Ripristina e metti in pausa   Ctrl+Alt+R", null, delegate { Restore(); });
+        menu.Items.Add("Zoom zona: istruzioni   Ctrl+Alt+Z", null, delegate {
+            tray.ShowBalloonTip(6000, "Seleziona una zona", "Porta il mouse sopra la finestra, premi Ctrl+Alt+Z e trascina un rettangolo. Esc chiude la vista zoom.", ToolTipIcon.Info);
+        });
+        menu.Items.Add("Chiudi tutti gli zoom", null, delegate { CloseFocus(); });
         var startup = new ToolStripMenuItem("Avvia con Windows");
         using (var key = Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run"))
             startup.Checked = key != null && key.GetValue("DextopORG") != null;
@@ -89,10 +95,10 @@ internal sealed class Organizer : ApplicationContext
         menu.Items.Add("Esci", null, delegate { ExitThread(); });
         tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "DextopORG · automatico", ContextMenuStrip = menu, Visible = true };
         tray.DoubleClick += delegate { Toggle(); };
-        hotkeys = new HotkeyWindow(id => { if (id == 1) Arrange(); if (id == 2) Toggle(); if (id == 3) Restore(); });
+        hotkeys = new HotkeyWindow(id => { if (id == 1) Arrange(); if (id == 2) Toggle(); if (id == 3) Restore(); if (id == 4) SelectFocus(); });
         if (!hotkeys.AllRegistered) tray.ShowBalloonTip(6000, "DextopORG", "Una scorciatoia è già in uso. Usa il menu dell'icona.", ToolTipIcon.Warning);
         timer.Tick += delegate {
-            if (!enabled || restoring || Native.GetAsyncKeyState(1) < 0) return;
+            if (!enabled || restoring || selecting || Native.GetAsyncKeyState(1) < 0) return;
             var windows = Windows();
             string next = Signature(windows);
             if (next != signature) Arrange(windows);
@@ -105,6 +111,7 @@ internal sealed class Organizer : ApplicationContext
     {
         var result = new List<IntPtr>();
         Native.EnumWindows(delegate(IntPtr h, IntPtr p) {
+            if (focusViews.Any(v => v.Source == h)) return true;
             if (!Native.IsWindowVisible(h) || Native.IsIconic(h) || Native.GetWindow(h, 4) != IntPtr.Zero) return true;
             long style = Native.GetWindowLong(h, -16), ex = Native.GetWindowLong(h, -20);
             if ((style & 0x40000) == 0 || (ex & 0x80) != 0) return true;
@@ -163,6 +170,7 @@ internal sealed class Organizer : ApplicationContext
     void Restore()
     {
         if (enabled) Toggle();
+        CloseFocus();
         restoring = true;
         foreach (var pair in originals) {
             var p = pair.Value;
@@ -173,9 +181,43 @@ internal sealed class Organizer : ApplicationContext
     }
     protected override void ExitThreadCore()
     {
+        CloseFocus();
         timer.Stop(); timer.Dispose(); hotkeys.Dispose();
         tray.Visible = false; tray.Dispose();
         base.ExitThreadCore();
+    }
+
+    void CloseFocus() { foreach (var view in focusViews.ToArray()) view.Close(); }
+    void SelectFocus()
+    {
+        if (selecting) return;
+        IntPtr source = Native.GetAncestor(Native.WindowFromPoint(new Native.Point { x = Cursor.Position.X, y = Cursor.Position.Y }), 2);
+        if (source == IntPtr.Zero || focusViews.Any(v => v.Handle == source)) return;
+        uint pid;
+        Native.GetWindowThreadProcessId(source, out pid);
+        if (pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return;
+        Native.Rect rect;
+        if (!Native.IsWindowVisible(source) || Native.IsIconic(source) || !Native.GetWindowRect(source, out rect)) return;
+        Rectangle bounds = Rectangle.FromLTRB(rect.left, rect.top, rect.right, rect.bottom);
+        Rectangle visible = Rectangle.Intersect(bounds, Screen.FromHandle(source).Bounds);
+        if (visible.Width < 16 || visible.Height < 16) return;
+        selecting = true;
+        try {
+            using (var selector = new RegionSelector(visible)) {
+                if (selector.ShowDialog() != DialogResult.OK || !Native.IsWindow(source)) return;
+                Rectangle selected = selector.Selection;
+                selected.Offset(visible.Left - bounds.Left, visible.Top - bounds.Top);
+                foreach (var old in focusViews.Where(v => v.Source == source).ToArray()) old.Close();
+                var view = new FocusView(source, selected, bounds);
+                view.FormClosed += delegate { focusViews.Remove(view); signature = ""; };
+                focusViews.Add(view);
+                try { view.Show(); }
+                catch { focusViews.Remove(view); view.Dispose(); throw; }
+                signature = "";
+            }
+        } catch (Exception e) {
+            tray.ShowBalloonTip(5000, "Zoom non disponibile", e.Message, ToolTipIcon.Warning);
+        } finally { selecting = false; }
     }
 }
 
@@ -187,7 +229,7 @@ internal sealed class HotkeyWindow : NativeWindow, IDisposable
     {
         action = handler;
         CreateHandle(new CreateParams());
-        int[] keys = { (int)Keys.O, (int)Keys.P, (int)Keys.R };
+        int[] keys = { (int)Keys.O, (int)Keys.P, (int)Keys.R, (int)Keys.Z };
         for (int i = 0; i < keys.Length; i++)
             if (!Native.RegisterHotKey(Handle, i + 1, 0x4003, keys[i])) AllRegistered = false;
     }
@@ -196,7 +238,7 @@ internal sealed class HotkeyWindow : NativeWindow, IDisposable
         if (m.Msg == 0x0312) action(m.WParam.ToInt32());
         base.WndProc(ref m);
     }
-    public void Dispose() { for (int i = 1; i <= 3; i++) Native.UnregisterHotKey(Handle, i); DestroyHandle(); }
+    public void Dispose() { for (int i = 1; i <= 4; i++) Native.UnregisterHotKey(Handle, i); DestroyHandle(); }
 }
 
 internal static class Native
@@ -206,6 +248,9 @@ internal static class Native
     [StructLayout(LayoutKind.Sequential)] public struct Point { public int x, y; }
     [StructLayout(LayoutKind.Sequential)] public struct Placement { public int length, flags, showCmd; public Point min, max; public Rect normal; }
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point p);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc callback, IntPtr p);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);

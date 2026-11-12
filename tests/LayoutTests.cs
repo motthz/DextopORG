@@ -19,6 +19,15 @@ class LayoutTests
             checks++;
         }
         if (Layout.Compute(new Rectangle(0,0,100,100),0).Length != 0) throw new Exception("Empty");
-        Console.WriteLine("PASS: " + checks + " layouts, count/bounds/overlap/full coverage; empty layout.");
+        foreach (var source in new[] { new Size(400,100), new Size(100,400), new Size(133,177), new Size(800,600) })
+        foreach (var target in new[] { new Rectangle(0,0,1920,1080), new Rectangle(13,27,333,777), new Rectangle(0,0,1,1) }) {
+            var fit = FocusGeometry.Fit(source,target);
+            if (!target.Contains(fit)) throw new Exception("Zoom bounds");
+            if (Math.Abs((fit.Left * 2 + fit.Width) - (target.Left * 2 + target.Width)) > 1 ||
+                Math.Abs((fit.Top * 2 + fit.Height) - (target.Top * 2 + target.Height)) > 1) throw new Exception("Zoom centering");
+            if (fit.Width > 1 && fit.Height > 1 && Math.Abs((double)fit.Width / fit.Height - (double)source.Width / source.Height) > 0.05) throw new Exception("Zoom aspect");
+        }
+        if (FocusGeometry.Fit(Size.Empty,new Rectangle(0,0,10,10)) != Rectangle.Empty) throw new Exception("Empty zoom");
+        Console.WriteLine("PASS: " + checks + " layouts; 12 zoom aspect/bounds/centering cases; empty inputs.");
     }
 }
